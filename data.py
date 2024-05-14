@@ -21,7 +21,7 @@ class PreProcess(nn.Module):
         return self.transform(x)
     
 class DiffiusionDataModule(L.LightningDataModule):
-    def __init__(self, data_dir: str = "trafic_32", batch_size: int = 256, num_workers: int=10):
+    def __init__(self, data_dir: str = "trafic_32", batch_size: int = 256, num_workers: int=7):
         super().__init__()
         self.data_dir = data_dir
         self.batch_size = batch_size
