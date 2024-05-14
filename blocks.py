@@ -29,6 +29,25 @@ class ResidualBlock(nn.Module):
         out += self.shortcut(x)
         out = self.relu(out)
         return out
+class SelfAttention(nn.Module):
+    def __init__(self, in_dim):
+        super(SelfAttention, self).__init__()
+        self.query_conv = nn.Conv2d(in_channels=in_dim, out_channels=in_dim//8, kernel_size=1)
+        self.key_conv = nn.Conv2d(in_channels=in_dim, out_channels=in_dim//8, kernel_size=1)
+        self.value_conv = nn.Conv2d(in_channels=in_dim, out_channels=in_dim, kernel_size=1)
+        self.gamma = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x):
+        batchsize, C, width, height = x.size()
+        proj_query  = self.query_conv(x).view(batchsize, -1, width * height).permute(0, 2, 1)
+        proj_key =  self.key_conv(x).view(batchsize, -1, width * height)
+        energy =  torch.bmm(proj_query, proj_key)
+        attention = F.softmax(energy, dim=-1)
+        proj_value = self.value_conv(x).view(batchsize, -1, width * height)
+        out = torch.bmm(proj_value, attention.permute(0, 2, 1))
+        out = out.view(batchsize, C, width, height)
+        out = self.gamma*out + x
+        return out
     
 class DownBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -36,11 +55,13 @@ class DownBlock(nn.Module):
         self.residual1 = ResidualBlock(in_channels, out_channels)
         self.residual2 = ResidualBlock(out_channels, out_channels)
         self.pool = nn.MaxPool2d(2)
+        self.attention = SelfAttention(out_channels)
 
     def forward(self, x, skip_connections):
         x = self.residual1(x)
         skip_connections.append(x)
         x = self.residual2(x)
+        x = self.attention(x)
         skip_connections.append(x)
         x = self.pool(x)
         return x
@@ -51,6 +72,7 @@ class UpBlock(nn.Module):
         self.up = nn.ConvTranspose2d(in_channels, in_channels, kernel_size=2, stride=2)
         self.residual1 = ResidualBlock(in_channels+out_channels, out_channels)
         self.residual2 = ResidualBlock(out_channels*2, out_channels)
+        self.attention = SelfAttention(out_channels)
 
     def forward(self, x, skip_connections):
         x = self.up(x)
@@ -58,25 +80,31 @@ class UpBlock(nn.Module):
         x = self.residual1(x)
         x= torch.cat((x, skip_connections.pop()), dim=1)
         x = self.residual2(x)
+        x = self.attention(x)
         return x
+
+
 
 class UNet(nn.Module):
     def __init__(self, num_classes, device, sinusoidal_embedding, class_emb_size=8, latent_class_emb_size=32):
         super(UNet, self).__init__()
-        self.down1 = DownBlock(64+latent_class_emb_size, 32)
+        self.down1 = DownBlock(64 + latent_class_emb_size, 32)
         self.down2 = DownBlock(32, 64)
         self.down3 = DownBlock(64, 96)
-        self.res1 = ResidualBlock(96, 128)
-        self.res2 = ResidualBlock(128, 128)
-        self.up1 = UpBlock(128, 96)
-        self.up2 = UpBlock(96, 64)
-        self.up3 = UpBlock(64, 32)
+        self.down4 = DownBlock(96, 128) 
+        self.res1 = ResidualBlock(128, 256)
+        self.res2 = ResidualBlock(256, 256)
+        self.attention = SelfAttention(256)
+        self.up1 = UpBlock(256, 128)
+        self.up2 = UpBlock(128, 96)
+        self.up3 = UpBlock(96, 64)
+        self.up4 = UpBlock(64, 32) 
         self.final_conv = nn.Conv2d(32, 3, kernel_size=1, device=device)
         self.init_conv = nn.Conv2d(3, 32, kernel_size=1, device=device)
-        
+
         self.class_emb = nn.Embedding(num_classes, class_emb_size)
         self.conditioning_layer = nn.Linear(class_emb_size, latent_class_emb_size)
-        
+
         self.sinusoidal_embedding = sinusoidal_embedding
 
     def forward(self, x, noise_variances, class_labels):
@@ -95,12 +123,15 @@ class UNet(nn.Module):
         x = self.down1(x, skip_connections)
         x = self.down2(x, skip_connections)
         x = self.down3(x, skip_connections)
-        
+        x = self.down4(x, skip_connections)
+
         x = self.res1(x)
         x = self.res2(x)
+        x = self.attention(x)
         x = self.up1(x, skip_connections)
         x = self.up2(x, skip_connections)
         x = self.up3(x, skip_connections)
+        x = self.up4(x, skip_connections) 
 
         x = self.final_conv(x)
         return x
